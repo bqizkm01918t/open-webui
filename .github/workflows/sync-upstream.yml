@@ -16,36 +16,43 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # 上游仓库信息
       UPSTREAM_REPO: "https://github.com/open-webui/open-webui.git "
       UPSTREAM_BRANCH: "main"
-      MY_REPO: "bqizkm01918t/open-webui"
+
+      # 当前仓库（你的 fork）
+      MY_OWNER: "bqizkm01918t"
+      MY_REPO: "open-webui"
       MY_BRANCH: "main"
 
-      DOCKER_UPSTREAM_IMAGE: "ghcr.io/open-webui/open-webui:main"
-      DOCKER_MY_IMAGE: "bqizkm01918t/open-webui:latest"
+      # Docker 镜像配置（使用 GHCR）
+      DOCKER_UPSTREAM_IMAGE: "ghcr.io/open-webui/open-webui:latest"
+      DOCKER_MY_IMAGE: "ghcr.io/bqizkm01918t/open-webui:latest"
 
     steps:
       - name: 🪵 开始执行同步任务
         run: |
           echo "🚀 【开始】自动同步上游项目"
           echo "📅 当前时间 (UTC): $(date --utc)"
-          echo "📦 目标仓库: $MY_REPO"
+          echo "📦 目标仓库: $MY_OWNER/$MY_REPO"
           echo "🔗 上游地址: $UPSTREAM_REPO"
+          echo "🐋 上游镜像: $DOCKER_UPSTREAM_IMAGE"
+          echo "📤 我的镜像: $DOCKER_MY_IMAGE"
 
-      - name: 🔽 检出我的仓库（含全部历史）
+      - name: 🔽 检出我的仓库（含完整历史）
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.PAT_TOKEN }}
-          fetch-depth: 0  # 获取完整历史，便于合并
+          fetch-depth: 0
 
       - name: 🌐 获取上游最新提交
         id: fetch_upstream
         run: |
-          echo "📡 正在添加上游远程源..."
+          echo "📡 添加上游远程源..."
           git remote add upstream $UPSTREAM_REPO || true
           git fetch upstream
 
-          # 记录当前本地最后一次提交（用于后续恢复关键文件）
+          # 记录当前本地提交（用于恢复 workflow）
           CURRENT_COMMIT=$(git rev-parse HEAD)
           echo "💾 当前本地提交: $CURRENT_COMMIT"
 
@@ -67,7 +74,7 @@ jobs:
       - name: 🔄 合并上游变更
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
-          echo "📦 正在将上游变更应用到本地分支..."
+          echo "📦 正在应用上游更改..."
           git config user.name "Auto Sync Bot"
           git config user.email "sync@github.com"
           git rebase upstream/$UPSTREAM_BRANCH
@@ -82,44 +89,67 @@ jobs:
           if [ -f ".github/workflows/sync-upstream.yml" ]; then
             echo "✅ 成功恢复 .github/workflows/sync-upstream.yml"
           else
-            echo "❌ 恢复失败！文件可能不存在于原提交中，请检查路径。"
+            echo "❌ 错误：未找到 sync-upstream.yml，请确认路径正确且文件存在。"
             exit 1
           fi
 
-      - name: 💾 提交更新
+      - name: 💾 提交更改
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
           git add .
-          git status --porcelain | head -20  # 显示变更列表（最多20行）
-          git commit -m "🔄 自动同步上游代码 + 保留 CI 工作流" || echo "⚠️ 无新更改需提交"
+          git status --porcelain | head -20 || true
+          git commit -m "🔄 自动同步上游 + 保留 CI 工作流" || echo "无新更改需提交"
 
       - name: 📤 推送更新到我的仓库
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
-          echo "📤 正在推送更新到 https://github.com/ $MY_REPO"
+          echo "📤 推送更新到 https://github.com/ $MY_OWNER/$MY_REPO"
           git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/$MY_REPO.git $MY_BRANCH --force
-          echo "🎉 【成功】已推送最新代码（含工作流保护）"
+          echo "🎉 【成功】代码已推送完成"
 
-      - name: 🐳 登录容器注册中心
+      - name: 🐳 登录 GitHub Container Registry (GHCR)
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
           echo "🔐 正在登录 ghcr.io ..."
-          echo ${{ secrets.PAT_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          echo "✅ 登录成功"
+          # 强制使用你的用户名登录
+          echo ${{ secrets.PAT_TOKEN }} | docker login ghcr.io -u bqizkm01918t --password-stdin
+          if [ $? -ne 0 ]; then
+            echo "❌ 登录失败！请检查："
+            echo "   1. PAT_TOKEN 是否设置了 repo 和 write:packages 权限"
+            echo "   2. Secrets 中名称是否为 PAT_TOKEN"
+            echo "   3. 用户名是否拼写正确（bqizkm01918t）"
+            exit 1
+          fi
+          echo "✅ 登录 ghcr.io 成功"
 
       - name: 🖼️ 拉取并推送 Docker 镜像
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
           echo "📥 正在拉取上游镜像: $DOCKER_UPSTREAM_IMAGE"
           docker pull $DOCKER_UPSTREAM_IMAGE
+          if [ $? -ne 0 ]; then
+            echo "❌ 拉取镜像失败！可能原因："
+            echo "   • 镜像不存在或标签错误（建议查看 https://github.com/open-webui/open-webui/pkgs/container/open-webui ）"
+            echo "   • 网络问题"
+            exit 1
+          fi
 
-          echo "🏷️ 正在打标签: $DOCKER_MY_IMAGE"
+          echo "🏷️ 正在打标签为 $DOCKER_MY_IMAGE"
           docker tag $DOCKER_UPSTREAM_IMAGE $DOCKER_MY_IMAGE
 
-          echo "📤 正在推送镜像到我的仓库"
+          echo "📤 正在推送镜像到 $DOCKER_MY_IMAGE"
           docker push $DOCKER_MY_IMAGE
+          if [ $? -ne 0 ]; then
+            echo "❌ 推送镜像失败！可能原因："
+            echo "   • PAT_TOKEN 缺少 write:packages 权限"
+            echo "   • 尚未初始化容器包，请先手动推送一次测试镜像"
+            echo "   💡 解决方案："
+            echo "      docker tag hello-world ghcr.io/bqizkm01918t/open-webui:test"
+            echo "      docker push ghcr.io/bqizkm01918t/open-webui:test"
+            exit 1
+          fi
 
-          echo "✅ 【完成】Docker 镜像已同步至 $DOCKER_MY_IMAGE"
+          echo "✅ 【成功】Docker 镜像已同步至 $DOCKER_MY_IMAGE"
 
       - name: 📝 同步任务总结报告
         run: |
