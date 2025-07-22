@@ -2,10 +2,9 @@ name: 🔁 自动同步上游代码与镜像
 
 on:
   schedule:
-    - cron: '0 6 */1 * *'   # 每天 UTC 时间 6:00 执行（北京时间 14:00）
-  workflow_dispatch:         # 支持手动触发
+    - cron: '0 6 */1 * *'
+  workflow_dispatch:
 
-# 防止重复运行
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
@@ -16,153 +15,110 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # 上游仓库信息
       UPSTREAM_REPO: "https://github.com/open-webui/open-webui.git "
       UPSTREAM_BRANCH: "main"
-
-      # 当前仓库（你的 fork）
       MY_OWNER: "bqizkm01918t"
       MY_REPO: "open-webui"
       MY_BRANCH: "main"
 
-      # Docker 镜像配置（使用 GHCR）
       DOCKER_UPSTREAM_IMAGE: "ghcr.io/open-webui/open-webui:latest"
       DOCKER_MY_IMAGE: "ghcr.io/bqizkm01918t/open-webui:latest"
 
     steps:
-      - name: 🪵 开始执行同步任务
+      - name: 🪵 开始任务
         run: |
-          echo "🚀 【开始】自动同步上游项目"
-          echo "📅 当前时间 (UTC): $(date --utc)"
-          echo "📦 目标仓库: $MY_OWNER/$MY_REPO"
-          echo "🔗 上游地址: $UPSTREAM_REPO"
-          echo "🐋 上游镜像: $DOCKER_UPSTREAM_IMAGE"
-          echo "📤 我的镜像: $DOCKER_MY_IMAGE"
+          echo "🚀 启动同步流程 (UTC: $(date --utc))"
 
-      - name: 🔽 检出我的仓库（含完整历史）
+      - name: 🔍 调试：打印环境变量
+        run: |
+          echo "🔍 当前用户: $MY_OWNER"
+          echo "📦 仓库: $MY_REPO"
+          echo "🔗 上游: $UPSTREAM_REPO"
+          echo "🐳 镜像: $DOCKER_MY_IMAGE"
+
+      - name: 🔽 检出代码
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
 
-      - name: 🌐 获取上游最新提交
+      - name: 🌐 获取上游提交
         id: fetch_upstream
         run: |
-          echo "📡 添加上游远程源..."
+          git config --global user.name "Auto Sync Bot"
+          git config --global user.email "sync@github.com"
+
           git remote add upstream $UPSTREAM_REPO || true
-          git fetch upstream
+          git fetch upstream || { echo "❌ 获取上游失败，请检查网络或 URL"; exit 1; }
 
-          # 记录当前本地提交（用于恢复 workflow）
-          CURRENT_COMMIT=$(git rev-parse HEAD)
-          echo "💾 当前本地提交: $CURRENT_COMMIT"
+          CURRENT=$(git rev-parse HEAD)
+          LATEST=$(git rev-parse upstream/$UPSTREAM_BRANCH)
 
-          # 获取上游最新提交
-          LATEST_UPSTREAM=$(git rev-parse upstream/$UPSTREAM_BRANCH)
-          echo "🆕 上游最新提交: $LATEST_UPSTREAM"
+          echo "💾 当前: $CURRENT"
+          echo "🆕 上游: $LATEST"
 
-          if [ "$LATEST_UPSTREAM" = "$CURRENT_COMMIT" ]; then
-            echo "🟢 本地已是最新，无需同步。"
+          if [ "$CURRENT" = "$LATEST" ]; then
+            echo "🟢 已最新，跳过"
             echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
             exit 0
           else
-            echo "🔥 检测到上游有更新，准备同步..."
             echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
-            echo "CURRENT_COMMIT=$CURRENT_COMMIT" >> $GITHUB_ENV
-            echo "NEW_COMMIT=$LATEST_UPSTREAM" >> $GITHUB_ENV
+            echo "CURRENT_COMMIT=$CURRENT" >> $GITHUB_ENV
           fi
 
-      - name: 🔄 合并上游变更
+      - name: 🔄 合并上游
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
-          echo "📦 正在应用上游更改..."
-          git config user.name "Auto Sync Bot"
-          git config user.email "sync@github.com"
           git rebase upstream/$UPSTREAM_BRANCH
-          echo "✅ 成功合并上游代码"
+          echo "✅ 合并完成"
 
-      - name: 🔑 恢复关键文件（防止工作流失效）
+      - name: 🔑 恢复工作流文件
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
-          echo "🛡️ 【重要】正在恢复被覆盖的工作流文件..."
           git checkout ${{ env.CURRENT_COMMIT }} -- .github/workflows/
-          
-          if [ -f ".github/workflows/sync-upstream.yml" ]; then
-            echo "✅ 成功恢复 .github/workflows/sync-upstream.yml"
-          else
-            echo "❌ 错误：未找到 sync-upstream.yml，请确认路径正确且文件存在。"
-            exit 1
-          fi
+          [ -f ".github/workflows/sync-upstream.yml" ] && echo "✅ 恢复成功" || { echo "❌ 恢复失败"; exit 1; }
 
       - name: 💾 提交更改
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
           git add .
-          git status --porcelain | head -20 || true
-          git commit -m "🔄 自动同步上游 + 保留 CI 工作流" || echo "无新更改需提交"
+          git commit -m "🔄 Sync & preserve workflow" || echo "无变更"
 
-      - name: 📤 推送更新到我的仓库
+      - name: 📤 推送更新（带详细错误）
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
-          echo "📤 推送更新到 https://github.com/ $MY_OWNER/$MY_REPO"
-          git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/$MY_REPO.git $MY_BRANCH --force
-          echo "🎉 【成功】代码已推送完成"
+          REMOTE_URL="https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/$MY_OWNER/$MY_REPO.git"
+          echo "📤 推送到: $REMOTE_URL"
+          
+          # 分步执行以便定位错误
+          git remote set-url origin "$REMOTE_URL"
+          git push origin $MY_BRANCH --force
 
-      - name: 🐳 登录 GitHub Container Registry (GHCR)
-        if: ${{ env.UPDATE_NEEDED == 'true' }}
-        run: |
-          echo "🔐 正在登录 ghcr.io ..."
-          # 强制使用你的用户名登录
-          echo ${{ secrets.PAT_TOKEN }} | docker login ghcr.io -u bqizkm01918t --password-stdin
           if [ $? -ne 0 ]; then
-            echo "❌ 登录失败！请检查："
-            echo "   1. PAT_TOKEN 是否设置了 repo 和 write:packages 权限"
-            echo "   2. Secrets 中名称是否为 PAT_TOKEN"
-            echo "   3. 用户名是否拼写正确（bqizkm01918t）"
+            echo "❌ Git 推送失败 (exit code 128)，可能原因："
+            echo "   1. PAT_TOKEN 无效或权限不足（需 repo + write:packages）"
+            echo "   2. 用户名拼写错误（当前: $MY_OWNER）"
+            echo "   3. 仓库不存在或已被删除"
+            echo "   4. Actions 权限未开启读写"
+            echo "💡 请检查：https://github.com/ $MY_OWNER/$MY_REPO/settings/actions"
             exit 1
           fi
-          echo "✅ 登录 ghcr.io 成功"
+          echo "🎉 推送成功！"
 
-      - name: 🖼️ 拉取并推送 Docker 镜像
+      - name: 🐳 登录 GHCR
         if: ${{ env.UPDATE_NEEDED == 'true' }}
         run: |
-          echo "📥 正在拉取上游镜像: $DOCKER_UPSTREAM_IMAGE"
-          docker pull $DOCKER_UPSTREAM_IMAGE
-          if [ $? -ne 0 ]; then
-            echo "❌ 拉取镜像失败！可能原因："
-            echo "   • 镜像不存在或标签错误（建议查看 https://github.com/open-webui/open-webui/pkgs/container/open-webui ）"
-            echo "   • 网络问题"
-            exit 1
-          fi
+          echo ${{ secrets.PAT_TOKEN }} | docker login ghcr.io -u $MY_OWNER --password-stdin
+          [ $? -eq 0 ] && echo "✅ 登录成功" || { echo "❌ 登录失败"; exit 1; }
 
-          echo "🏷️ 正在打标签为 $DOCKER_MY_IMAGE"
+      - name: 🖼️ 同步 Docker 镜像
+        if: ${{ env.UPDATE_NEEDED == 'true' }}
+        run: |
+          docker pull $DOCKER_UPSTREAM_IMAGE || { echo "❌ 拉取失败"; exit 1; }
           docker tag $DOCKER_UPSTREAM_IMAGE $DOCKER_MY_IMAGE
+          docker push $DOCKER_MY_IMAGE || { echo "❌ 推送失败，请检查 write:packages 权限"; exit 1; }
+          echo "✅ 镜像同步完成"
 
-          echo "📤 正在推送镜像到 $DOCKER_MY_IMAGE"
-          docker push $DOCKER_MY_IMAGE
-          if [ $? -ne 0 ]; then
-            echo "❌ 推送镜像失败！可能原因："
-            echo "   • PAT_TOKEN 缺少 write:packages 权限"
-            echo "   • 尚未初始化容器包，请先手动推送一次测试镜像"
-            echo "   💡 解决方案："
-            echo "      docker tag hello-world ghcr.io/bqizkm01918t/open-webui:test"
-            echo "      docker push ghcr.io/bqizkm01918t/open-webui:test"
-            exit 1
-          fi
-
-          echo "✅ 【成功】Docker 镜像已同步至 $DOCKER_MY_IMAGE"
-
-      - name: 📝 同步任务总结报告
+      - name: 📝 报告总结
         run: |
-          echo "📊 =============== 同步任务完成报告 ==============="
-          echo "📌 任务状态: 成功 ✔️"
-          echo "⏰ 完成时间 (UTC): $(date --utc)"
-          if [ "${{ env.UPDATE_NEEDED }}" = "true" ]; then
-            echo "🔄 动作: 已同步上游代码与镜像"
-            echo "🔍 最新提交: ${{ env.NEW_COMMIT }}"
-            echo "🐋 镜像更新: $DOCKER_MY_IMAGE"
-          else
-            echo "🔄 动作: 无需同步，已是最新版本"
-          fi
-          echo "💡 提示: 本工作流已自我保护，下次仍可正常运行"
-          echo "👋 感谢使用！下次见～"
-          echo "=================================================="
+          echo "✅ 任务完成！下次见～"
