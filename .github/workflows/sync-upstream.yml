@@ -1,0 +1,138 @@
+name: 🔁 自动同步上游代码与镜像
+
+on:
+  schedule:
+    - cron: '0 6 */1 * *'   # 每天 UTC 时间 6:00 执行（北京时间 14:00）
+  workflow_dispatch:         # 支持手动触发
+
+# 防止重复运行
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 🔄 同步上游并保留工作流
+    runs-on: ubuntu-latest
+
+    env:
+      UPSTREAM_REPO: "https://github.com/open-webui/open-webui.git "
+      UPSTREAM_BRANCH: "main"
+      MY_REPO: "bqizkm01918t/open-webui"
+      MY_BRANCH: "main"
+
+      DOCKER_UPSTREAM_IMAGE: "ghcr.io/open-webui/open-webui:main"
+      DOCKER_MY_IMAGE: "bqizkm01918t/open-webui:latest"
+
+    steps:
+      - name: 🪵 开始执行同步任务
+        run: |
+          echo "🚀 【开始】自动同步上游项目"
+          echo "📅 当前时间 (UTC): $(date --utc)"
+          echo "📦 目标仓库: $MY_REPO"
+          echo "🔗 上游地址: $UPSTREAM_REPO"
+
+      - name: 🔽 检出我的仓库（含全部历史）
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          fetch-depth: 0  # 获取完整历史，便于合并
+
+      - name: 🌐 获取上游最新提交
+        id: fetch_upstream
+        run: |
+          echo "📡 正在添加上游远程源..."
+          git remote add upstream $UPSTREAM_REPO || true
+          git fetch upstream
+
+          # 记录当前本地最后一次提交（用于后续恢复关键文件）
+          CURRENT_COMMIT=$(git rev-parse HEAD)
+          echo "💾 当前本地提交: $CURRENT_COMMIT"
+
+          # 获取上游最新提交
+          LATEST_UPSTREAM=$(git rev-parse upstream/$UPSTREAM_BRANCH)
+          echo "🆕 上游最新提交: $LATEST_UPSTREAM"
+
+          if [ "$LATEST_UPSTREAM" = "$CURRENT_COMMIT" ]; then
+            echo "🟢 本地已是最新，无需同步。"
+            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
+            exit 0
+          else
+            echo "🔥 检测到上游有更新，准备同步..."
+            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
+            echo "CURRENT_COMMIT=$CURRENT_COMMIT" >> $GITHUB_ENV
+            echo "NEW_COMMIT=$LATEST_UPSTREAM" >> $GITHUB_ENV
+          fi
+
+      - name: 🔄 合并上游变更
+        if: ${{ env.UPDATE_NEEDED == 'true' }}
+        run: |
+          echo "📦 正在将上游变更应用到本地分支..."
+          git config user.name "Auto Sync Bot"
+          git config user.email "sync@github.com"
+          git rebase upstream/$UPSTREAM_BRANCH
+          echo "✅ 成功合并上游代码"
+
+      - name: 🔑 恢复关键文件（防止工作流失效）
+        if: ${{ env.UPDATE_NEEDED == 'true' }}
+        run: |
+          echo "🛡️ 【重要】正在恢复被覆盖的工作流文件..."
+          git checkout ${{ env.CURRENT_COMMIT }} -- .github/workflows/
+          
+          if [ -f ".github/workflows/sync-upstream.yml" ]; then
+            echo "✅ 成功恢复 .github/workflows/sync-upstream.yml"
+          else
+            echo "❌ 恢复失败！文件可能不存在于原提交中，请检查路径。"
+            exit 1
+          fi
+
+      - name: 💾 提交更新
+        if: ${{ env.UPDATE_NEEDED == 'true' }}
+        run: |
+          git add .
+          git status --porcelain | head -20  # 显示变更列表（最多20行）
+          git commit -m "🔄 自动同步上游代码 + 保留 CI 工作流" || echo "⚠️ 无新更改需提交"
+
+      - name: 📤 推送更新到我的仓库
+        if: ${{ env.UPDATE_NEEDED == 'true' }}
+        run: |
+          echo "📤 正在推送更新到 https://github.com/ $MY_REPO"
+          git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/$MY_REPO.git $MY_BRANCH --force
+          echo "🎉 【成功】已推送最新代码（含工作流保护）"
+
+      - name: 🐳 登录容器注册中心
+        if: ${{ env.UPDATE_NEEDED == 'true' }}
+        run: |
+          echo "🔐 正在登录 ghcr.io ..."
+          echo ${{ secrets.PAT_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "✅ 登录成功"
+
+      - name: 🖼️ 拉取并推送 Docker 镜像
+        if: ${{ env.UPDATE_NEEDED == 'true' }}
+        run: |
+          echo "📥 正在拉取上游镜像: $DOCKER_UPSTREAM_IMAGE"
+          docker pull $DOCKER_UPSTREAM_IMAGE
+
+          echo "🏷️ 正在打标签: $DOCKER_MY_IMAGE"
+          docker tag $DOCKER_UPSTREAM_IMAGE $DOCKER_MY_IMAGE
+
+          echo "📤 正在推送镜像到我的仓库"
+          docker push $DOCKER_MY_IMAGE
+
+          echo "✅ 【完成】Docker 镜像已同步至 $DOCKER_MY_IMAGE"
+
+      - name: 📝 同步任务总结报告
+        run: |
+          echo "📊 =============== 同步任务完成报告 ==============="
+          echo "📌 任务状态: 成功 ✔️"
+          echo "⏰ 完成时间 (UTC): $(date --utc)"
+          if [ "${{ env.UPDATE_NEEDED }}" = "true" ]; then
+            echo "🔄 动作: 已同步上游代码与镜像"
+            echo "🔍 最新提交: ${{ env.NEW_COMMIT }}"
+            echo "🐋 镜像更新: $DOCKER_MY_IMAGE"
+          else
+            echo "🔄 动作: 无需同步，已是最新版本"
+          fi
+          echo "💡 提示: 本工作流已自我保护，下次仍可正常运行"
+          echo "👋 感谢使用！下次见～"
+          echo "=================================================="
